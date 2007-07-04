@@ -40,6 +40,7 @@ class Dialback(PlugIn):
             req=Node('db:verify',{'from':session.ourname,'to':frm,'id':session.ID},[key])
             s=self._owner.getsession(frm)
             if not s:
+		print "### db:No session for " + str(frm)
                 s=self._owner.S2S(session.ourname,frm.getDomain(),slave_session=session)
             s.send(req)
             if self.waitlist.has_key(frm):

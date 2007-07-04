@@ -1,14 +1,17 @@
 # Distributed under the terms of GPL version 2 or any later
+# Copyright (C) Kristopher Tate / BlueBridge Technologies Group 2005
 # Copyright (C) Alexey Nezhdanov 2004
+
 # Stream-level features for xmppd.py
 
-# $Id: stream.py,v 1.6 2004/10/23 09:28:11 snakeru Exp $
-
 from xmpp import *
-from xmppd import *
+try:
+	from xmppd.xmppd import *
+except:
+	from xmppd import *
 import socket,thread
 from tlslite.api import *
-from constants import *
+import sha
 
 class TLS(PlugIn):
     """ 3.                        <features/>
@@ -24,6 +27,7 @@ class TLS(PlugIn):
         server.Dispatcher.RegisterHandler('features',self.FeaturesHandler,xmlns=NS_STREAMS)
 
     def starttlsHandler(self,session,stanza):
+	#print stanza
         if 'tls' in session.features:
             session.send(Node('failure',{'xmlns':NS_TLS}))
             self.DEBUG('TLS startup failure: already started.','error')
@@ -47,7 +51,7 @@ class TLS(PlugIn):
 
     def startservertls(self,session):
         session._owner.unregistersession(session)
-        thread.start_new_thread(self._startservertls,(session,))
+        self._startservertls(session)
 
     def _startservertls(self,session):
         try:
@@ -101,7 +105,8 @@ class TLS(PlugIn):
         if NS_TLS in session.features: return     # already started. do nothing
         if session.feature_in_process: return     # some other feature is already underway
         if not stanza.getTag('starttls',namespace=NS_TLS):
-            self.DEBUG("TLS unsupported by remote server.",'warn')
+            self.DEBUG("TLS unsupported by remote server; Doing nothing -- Prob. jabber.org?",'warn')
+            return
         else:
             self.DEBUG("TLS supported by remote server. Requesting TLS start.",'ok')
             session.start_feature(NS_TLS)
@@ -174,9 +179,9 @@ class SASL(PlugIn):
         session.StartStream()
         session.peer=authzid.lower()
         if session.xmlns==NS_CLIENT: session.set_session_state(SESSION_AUTHED)
-        elif session.xmlns==NS_COMPONENT_ACCEPT: session.set_session_state(SESSION_AUTHED)
         else: session.set_session_state(SESSION_BOUND)
         self.DEBUG('Peer %s successfully authenticated'%authzid,'ok')
+	self._owner.activatesession(session,authzid)
 
     def reject_auth(self,session,authzid='unknown'):
         session.send(Node('failure',{'xmlns':NS_SASL},[Node('not-authorized')]))
@@ -237,7 +242,6 @@ class SASL(PlugIn):
                     if not authzid:
                         authzid=authcid
                         if session.xmlns==NS_CLIENT: authzid+='@'+session.ourname
-                        #elif session.xmlns==NS_COMPONENT_ACCEPT: authzid+='.'+session.ourname
                     username,domain=(authzid.split('@',1)+[''])[:2]
                     res = ( passwd == self._owner.AUTH.getpassword(username, domain) )
                 if res: self.commit_auth(session,authzid)
@@ -294,11 +298,10 @@ class SASL(PlugIn):
 class Bind(PlugIn):
     NS=NS_BIND
     def plugin(self,server):
-        server.Dispatcher.RegisterHandler('iq',self.bindHandler,typ='set',ns=NS_BIND)
+        server.Dispatcher.RegisterHandler('iq',self.bindHandler,typ='set',ns=NS_BIND,xmlns=NS_CLIENT)
 
     def bindHandler(self,session,stanza):
-        #if session.xmlns<>NS_CLIENT or session.__dict__.has_key('resource'):
-        if (session.xmlns not in [NS_CLIENT, NS_COMPONENT_ACCEPT]) or session.__dict__.has_key('resource'):
+        if session.xmlns<>NS_CLIENT or session.__dict__.has_key('resource'):
             session.send(Error(stanza,ERR_SERVICE_UNAVAILABLE))
         else:
             if session._session_state<SESSION_AUTHED:
@@ -311,8 +314,8 @@ class Bind(PlugIn):
             s=self._owner.deactivatesession(fulljid)
             if s: s.terminate_stream(STREAM_CONFLICT)
             rep=stanza.buildReply('result')
-            rep.T.bind.setNamespace(NS_BIND)
-            rep.T.bind.T.jid=fulljid
+            rep.NT.bind.setNamespace(NS_BIND)
+            rep.T.bind.NT.jid=fulljid
             session.send(rep)
             session.set_session_state(SESSION_BOUND)
         raise NodeProcessed
@@ -320,14 +323,13 @@ class Bind(PlugIn):
 class Session(PlugIn):
     NS=NS_SESSION
     def plugin(self,server):
-        server.Dispatcher.RegisterHandler('iq',self.sessionHandler,typ='set',ns=NS_SESSION)
+        server.Dispatcher.RegisterHandler('iq',self.sessionHandler,typ='set',ns=NS_SESSION,xmlns=NS_CLIENT)
 
     def sessionHandler(self,session,stanza):
         if session._session_state<SESSION_AUTHED:
             session.terminate_stream(STREAM_NOT_AUTHORIZED)
             raise NodeProcessed
-        #if session.xmlns<>NS_CLIENT \
-        if session.xmlns not in [NS_CLIENT, NS_COMPONENT_ACCEPT] \
+        if session.xmlns<>NS_CLIENT \
           or session._session_state<SESSION_BOUND \
           or self._owner.getsession(session.peer)==session:
             session.send(Error(stanza,ERR_SERVICE_UNAVAILABLE))
@@ -335,3 +337,59 @@ class Session(PlugIn):
             session.set_session_state(SESSION_OPENED)
             session.send(stanza.buildReply('result'))
         raise NodeProcessed
+
+
+class Handshake(PlugIn):
+	NS=NS_COMPONENT_ACCEPT
+
+	def namespaceChangerAndRedirector(self,session,stanza):
+		if stanza.getName() == "handshake":
+			self.handshakeHandler(session, stanza)
+		if stanza.getName() in ['message', 'iq']:
+			self.DEBUG("Redirecting stanza %s to router"%(stanza),"info")
+			stanza.setNamespace(NS_CLIENT)
+			self.server.Router.routerHandler(session,stanza)
+		elif stanza.getName() == "presence":
+			self.DEBUG("Redirecting stanza %s to router"%(stanza),"info")
+			stanza.setNamespace(NS_CLIENT)
+			self.server.Router.presenceHandler(session,stanza)
+		return
+		
+
+	def plugin(self,server):
+		self.server = server
+		server.Dispatcher.RegisterNamespaceHandler(NS_COMPONENT_ACCEPT, self.namespaceChangerAndRedirector)
+		#server.Dispatcher.RegisterHandler('handshake',self.handshakeHandler,xmlns=NS_COMPONENT_ACCEPT)
+		#server.Dispatcher.RegisterHandler('presence',self.namespaceChangerAndRedirector,xmlns=NS_COMPONENT_ACCEPT)
+		#server.Dispatcher.RegisterHandler('message',self.namespaceChangerAndRedirector,xmlns=NS_COMPONENT_ACCEPT)
+		#server.Dispatcher.RegisterHandler('iq',self.namespaceChangerAndRedirector,xmlns=NS_COMPONENT_ACCEPT)
+
+	def handshakeHandler(self, session, stanza):
+		self.DEBUG('Handshake handler called','info')
+		if session._session_state >= SESSION_AUTHED:
+			session.terminate_stream(STREAM_NOT_AUTHORIZED)
+			self.DEBUG('Session already authed','warn')
+			return
+
+		handshake = str(stanza.getData())
+		for k,v in self.server.components.items():
+			try:
+				truehs = sha.new(str(session.ID)+v['password']).hexdigest()
+				if handshake == truehs:
+					# We have a match!! It's THIS component!!
+        				session.peer=v['jid'].lower()
+					self.server.activatesession(session, v['jid'])
+					session.set_session_state(SESSION_AUTHED)
+					session.set_session_state(SESSION_OPENED)
+					node , dom = v["jid"].split(".",1)
+					self.server.DB.register_user(dom, node, v['password'], v['name'])
+					session.send(Node('handshake'))
+					self.DEBUG('Component %s authenticated'%(v['jid']), 'ok')
+					return
+			except:
+				self.DEBUG('Error authenticating handshake', 'error')
+		self.DEBUG("Unknown component","warn")
+		self.DEBUG("Components: "+str(self.server.components),"warn")
+		return
+					
+		

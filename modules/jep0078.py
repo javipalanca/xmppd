@@ -5,6 +5,7 @@
 # $Id: jep0078.py,v 1.6 2004/10/23 09:22:44 snakeru Exp $
 
 from xmpp import *
+from xmppd import *
 #from xmppd import SESSION_OPENED
 import sha
 
@@ -20,10 +21,10 @@ class NSA(PlugIn):
             session.send(Error(stanza,ERR_ITEM_NOT_FOUND))
         else:
             iq=stanza.buildReply('result')
-            iq.T.query.T.username=stanza.T.query.T.username
-            iq.T.query.T.password
-            iq.T.query.T.digest
-            iq.T.query.T.resource
+            iq.T.query.NT.username=stanza.T.query.T.username
+            iq.T.query.NT.password
+            iq.T.query.NT.digest
+            iq.T.query.NT.resource
             session.send(iq)
         raise NodeProcessed
 
@@ -33,11 +34,16 @@ class NSA(PlugIn):
         username=stanza.T.query.T.username.getData().lower()
         password=self._owner.AUTH.getpassword(username,servername)
         if password is not None: digest=sha.new(session.ID+password).hexdigest()
+	try:
+		query_password = stanza.T.query.T.password.getData()
+	except:
+		query_password = None
+
         if servername not in self._owner.servernames:
             session.send(Error(stanza,ERR_ITEM_NOT_FOUND))
         elif session.ourname==servername \
           and password \
-          and (stanza.T.query.T.password.getData()==password \
+          and (query_password==password \
            or stanza.T.query.T.digest.getData()==digest ) \
           and stanza.T.query.T.resource.getData():
             session.send(stanza.buildReply('result'))
